@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OS Scheduler Lab</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="topbar-logo">os<span>_</span>scheduler<span>.lab</span></div>
+    <div class="server-status" id="serverStatus">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">Connecting...</span>
+    </div>
+    <div class="topbar-sep"></div>
+    <button class="theme-toggle" id="themeBtn" title="Toggle theme">◑</button>
+  </header>
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+
+    <!-- Algorithm -->
+    <div>
+      <div class="section-label">Algorithm</div>
+      <div class="algo-grid" id="algoGrid">
+        <button class="algo-btn active" data-algo="FCFS">FCFS</button>
+        <button class="algo-btn" data-algo="SJF">SJF</button>
+        <button class="algo-btn" data-algo="SRTF">SRTF</button>
+        <button class="algo-btn" data-algo="RR">Round Robin</button>
+        <button class="algo-btn" data-algo="PRIORITY_NP">Priority<br>Non-preemptive</button>
+        <button class="algo-btn" data-algo="PRIORITY_P">Priority<br>Preemptive</button>
+      </div>
+    </div>
+
+    <!-- RR quantum -->
+    <div id="quantumRow" style="display:none">
+      <div class="section-label">Configuration</div>
+      <div class="setting-row">
+        <label for="quantum">Time Quantum</label>
+        <input type="number" id="quantum" value="2" min="1" max="20">
+        <span style="font-size:12px;color:var(--fg-muted)">units</span>
+      </div>
+    </div>
+
+    <!-- Processes -->
+    <div>
+      <div class="section-label">Processes</div>
+      <div style="overflow-x:auto">
+        <table class="process-table" id="processTable">
+          <thead>
+            <tr>
+              <th>PID</th>
+              <th>Arrival</th>
+              <th>Burst</th>
+              <th id="priorityHeader" hidden>Pri</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="processBody"></tbody>
+        </table>
+      </div>
+      <div class="btn-row" style="margin-top:10px">
+        <button class="btn sm" id="addBtn">+ Add Process</button>
+        <button class="btn sm" id="clearBtn">Clear All</button>
+      </div>
+    </div>
+
+    <!-- Run -->
+    <button class="btn primary" id="runBtn" style="width:100%;justify-content:center">
+      ▶ Run Simulation
+    </button>
+
+  </aside>
+
+  <!-- MAIN PANEL -->
+  <main class="main" id="mainPanel">
+    <div class="placeholder" id="placeholder">
+      <div class="placeholder-icon">⚙</div>
+      <strong>No simulation yet</strong>
+      <span>Add processes on the left and click Run Simulation.</span>
+    </div>
+  </main>
+
+</div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────
+const SERVER = 'http://localhost:8080';
+
+const COLORS = [
+  '#58a6ff','#3fb950','#d29922','#f85149','#bc8cff',
+  '#79c0ff','#56d364','#e3b341','#ff7b72','#d2a8ff',
+];
+
+const ALGO_INFO = {
+  FCFS:        { name:'First Come First Serve',              type:'Non-preemptive', starvation:'No'  },
+  SJF:         { name:'Shortest Job First',                  type:'Non-preemptive', starvation:'Yes' },
+  SRTF:        { name:'Shortest Remaining Time First',       type:'Preemptive',     starvation:'Yes' },
+  RR:          { name:'Round Robin',                         type:'Preemptive',     starvation:'No'  },
+  PRIORITY_NP: { name:'Priority Scheduling (Non-preemptive)',type:'Non-preemptive', starvation:'Yes' },
+  PRIORITY_P:  { name:'Priority Scheduling (Preemptive)',    type:'Preemptive',     starvation:'Yes' },
+};
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let selectedAlgo = 'FCFS';
+let pidCounter   = 1;
+let processes    = [];
+let animHandle   = null;
+
+// Pre-load 5 sample processes
+[{a:0,b:5,p:3},{a:1,b:3,p:1},{a:2,b:8,p:4},{a:4,b:2,p:2},{a:5,b:4,p:5}]
+  .forEach(d => addProcess(d.a, d.b, d.p));
+
+// ── SERVER STATUS PING ────────────────────────────────────────────────────
+async function pingServer() {
+  try {
+    await fetch(SERVER + '/simulate', { method:'OPTIONS', signal: AbortSignal.timeout(2000) });
+    document.getElementById('statusDot').className  = 'status-dot online';
+    document.getElementById('statusText').textContent = 'Server online';
+  } catch {
+    document.getElementById('statusDot').className  = 'status-dot offline';
+    document.getElementById('statusText').textContent = 'Server offline';
+  }
+}
+pingServer();
+setInterval(pingServer, 5000);
+
+// ── ALGO BUTTONS ──────────────────────────────────────────────────────────
+document.getElementById('algoGrid').addEventListener('click', e => {
+  const btn = e.target.closest('.algo-btn');
+  if (!btn) return;
+  document.querySelectorAll('.algo-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  selectedAlgo = btn.dataset.algo;
+  updateVisibility();
+});
+
+function updateVisibility() {
+  const needsPriority = selectedAlgo === 'PRIORITY_NP' || selectedAlgo === 'PRIORITY_P';
+  const needsQuantum  = selectedAlgo === 'RR';
+  document.getElementById('priorityHeader').hidden = !needsPriority;
+  document.querySelectorAll('.priority-cell').forEach(c => c.hidden = !needsPriority);
+  document.getElementById('quantumRow').style.display = needsQuantum ? '' : 'none';
+}
+
+// ── PROCESS TABLE ─────────────────────────────────────────────────────────
+function addProcess(arrival=0, burst=4, priority=1) {
+  const color = COLORS[(pidCounter - 1) % COLORS.length];
+  processes.push({ id: pidCounter++, arrival, burst, priority, color });
+  renderTable();
+}
+
+function renderTable() {
+  const needsPriority = selectedAlgo === 'PRIORITY_NP' || selectedAlgo === 'PRIORITY_P';
+  document.getElementById('priorityHeader').hidden = !needsPriority;
+  const tbody = document.getElementById('processBody');
+  tbody.innerHTML = '';
+  processes.forEach((p, idx) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-family:var(--mono);font-size:12px;color:var(--fg-muted)">
+        <span class="pid-dot" style="background:${p.color}"></span>P${p.id}
+      </td>
+      <td><input type="number" value="${p.arrival}" min="0" data-idx="${idx}" data-field="arrival"></td>
+      <td><input type="number" value="${p.burst}"   min="1" data-idx="${idx}" data-field="burst"></td>
+      <td class="priority-cell" ${needsPriority?'':' hidden'}>
+        <input type="number" value="${p.priority}" min="1" max="10" data-idx="${idx}" data-field="priority">
+      </td>
+      <td><button class="del-btn" data-idx="${idx}">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById('processBody').addEventListener('input', e => {
+  const inp = e.target; if (!inp.dataset.field) return;
+  processes[+inp.dataset.idx][inp.dataset.field] = Math.max(+inp.min||0, +inp.value||0);
+});
+document.getElementById('processBody').addEventListener('click', e => {
+  const btn = e.target.closest('.del-btn'); if (!btn) return;
+  processes.splice(+btn.dataset.idx, 1); renderTable();
+});
+document.getElementById('addBtn').addEventListener('click', () => addProcess());
+document.getElementById('clearBtn').addEventListener('click', () => {
+  processes = []; pidCounter = 1; renderTable();
+  document.getElementById('mainPanel').innerHTML =
+    '<div class="placeholder"><div class="placeholder-icon">⚙</div><strong>No simulation yet</strong><span>Add processes and click Run.</span></div>';
+});
+
+// ── RUN ───────────────────────────────────────────────────────────────────
+document.getElementById('runBtn').addEventListener('click', async () => {
+  if (!processes.length) { alert('Add at least one process.'); return; }
+
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+
+  const payload = {
+    algorithm: selectedAlgo,
+    quantum:   +document.getElementById('quantum').value || 2,
+    processes: processes.map(p => ({
+      pid: p.id, arrival: p.arrival, burst: p.burst, priority: p.priority
+    }))
+  };
+
+  try {
+    const res  = await fetch(SERVER + '/simulate', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+
+    // Attach colors to process results (server doesn't know about colors)
+    data.processes.forEach(rp => {
+      const orig = processes.find(p => p.id === rp.pid);
+      rp.color = orig ? orig.color : '#888';
+    });
+
+    renderResults(data, selectedAlgo);
+  } catch (err) {
+    document.getElementById('mainPanel').innerHTML =
+      `<div class="placeholder"><div class="placeholder-icon" style="color:var(--danger)">✕</div>
+       <strong>Could not reach server</strong>
+       <span>Make sure the Java server is running:<br>
+       <code>java -cp .:lib/gson.jar SchedulerServer</code></span></div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '▶ Run Simulation';
+  }
+});
+
+// ── RENDER RESULTS ────────────────────────────────────────────────────────
+function renderResults(data, algo) {
+  const { gantt, processes: results } = data;
+  const info = ALGO_INFO[algo];
+
+  const avgWT    = (results.reduce((s,r)=>s+r.waiting,0)/results.length).toFixed(2);
+  const avgTAT   = (results.reduce((s,r)=>s+r.turnaround,0)/results.length).toFixed(2);
+  const totalTime= Math.max(...gantt.map(g=>g[2]));
+  const busyTime = results.reduce((s,r)=>s+r.burst,0);
+  const cpuUtil  = ((busyTime/totalTime)*100).toFixed(1);
+  const maxTAT   = Math.max(...results.map(r=>r.turnaround));
+
+  document.getElementById('mainPanel').innerHTML = `
+    <div class="algo-info">
+      <h3>${info.name}</h3>
+      <div class="complexity-row">
+        <div class="complexity-item">Type: <strong>${info.type}</strong></div>
+        <div class="complexity-item">Starvation: <strong>${info.starvation}</strong></div>
+      </div>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-card-label">Avg Waiting Time</div>
+        <div class="stat-card-val">${avgWT}<span class="stat-card-unit"> units</span></div></div>
+      <div class="stat-card"><div class="stat-card-label">Avg Turnaround Time</div>
+        <div class="stat-card-val">${avgTAT}<span class="stat-card-unit"> units</span></div></div>
+      <div class="stat-card"><div class="stat-card-label">CPU Utilization</div>
+        <div class="stat-card-val">${cpuUtil}<span class="stat-card-unit">%</span></div></div>
+      <div class="stat-card"><div class="stat-card-label">Total Time</div>
+        <div class="stat-card-val">${totalTime}<span class="stat-card-unit"> units</span></div></div>
+    </div>
+
+    <div class="gantt-wrap">
+      <div class="gantt-title">
+        Gantt Chart <span class="badge">${algo}</span>
+        <button class="btn sm" id="replayBtn" style="margin-left:auto">↺ Replay</button>
+      </div>
+      <div id="gantt-canvas-wrap"><canvas id="gantt-canvas"></canvas></div>
+      <div class="anim-controls">
+        <label>Speed</label>
+        <input type="range" class="speed-slider" id="speedSlider" min="1" max="10" value="6">
+        <span class="time-indicator" id="timeIndicator">t = 0</span>
+      </div>
+    </div>
+
+    <div class="results-wrap">
+      <div class="gantt-title">Process Analysis</div>
+      <div style="overflow-x:auto">
+        <table class="results-table">
+          <thead><tr>
+            <th>Process</th><th>Arrival</th><th>Burst</th>
+            <th>Completion</th><th>Turnaround</th><th>Waiting</th>
+            <th style="min-width:120px">TAT Bar</th>
+          </tr></thead>
+          <tbody>${results.sort((a,b)=>a.pid-b.pid).map(r=>`
+            <tr>
+              <td><span class="pid-dot" style="background:${r.color}"></span>
+                  <span style="font-family:var(--mono)">P${r.pid}</span></td>
+              <td style="font-family:var(--mono)">${r.arrival}</td>
+              <td style="font-family:var(--mono)">${r.burst}</td>
+              <td style="font-family:var(--mono)">${r.completion}</td>
+              <td style="font-family:var(--mono)">${r.turnaround}</td>
+              <td style="font-family:var(--mono)">${r.waiting}</td>
+              <td>
+                <div style="font-family:var(--mono);font-size:11px;color:var(--fg-muted)">${r.turnaround}</div>
+                <div class="bar-track"><div class="bar-fill" style="width:${maxTAT>0?(r.turnaround/maxTAT*100):0}%;background:${r.color}"></div></div>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  document.getElementById('replayBtn').addEventListener('click', () => animateGantt(gantt, totalTime));
+  animateGantt(gantt, totalTime);
+}
+
+// ── GANTT ANIMATION ───────────────────────────────────────────────────────
+function animateGantt(gantt, totalTime) {
+  if (animHandle) cancelAnimationFrame(animHandle);
+  const wrap   = document.getElementById('gantt-canvas-wrap');
+  const canvas = document.getElementById('gantt-canvas');
+  const slider = document.getElementById('speedSlider');
+  const lbl    = document.getElementById('timeIndicator');
+  if (!canvas) return;
+
+  const UNIT = Math.max(28, Math.min(60, Math.floor((wrap.clientWidth - 60) / (totalTime||1))));
+  const W = UNIT * totalTime + 60;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = W * dpr; canvas.height = 90 * dpr;
+  canvas.style.width = W+'px'; canvas.style.height = '90px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const isDark = document.documentElement.dataset.theme === 'dark' ||
+    (!document.documentElement.dataset.theme && window.matchMedia('(prefers-color-scheme:dark)').matches);
+  const fgMuted = isDark ? '#8b949e' : '#636c76';
+  const fgColor = isDark ? '#e6edf3' : '#1f2328';
+  const trackBg = isDark ? '#1c2333' : '#f0f3f6';
+  const BAR_Y=10, BAR_H=46;
+  let startTs = null;
+
+  // Build a color lookup from gantt data: pid → color
+  // We stored colors on the process objects; map pid → color via processes array
+  const colorMap = {};
+  processes.forEach(p => colorMap[p.id] = p.color);
+
+  function draw(progress) {
+    const curT = progress * totalTime;
+    ctx.clearRect(0,0,W,90);
+    ctx.fillStyle = trackBg; ctx.strokeStyle = fgMuted; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(30,BAR_Y,UNIT*totalTime,BAR_H,4);
+    ctx.fill(); ctx.stroke();
+
+    for (const seg of gantt) {
+      const [pid, start, end] = seg;
+      if (start >= curT) continue;
+      const visEnd = Math.min(end, curT);
+      const x = 30 + start*UNIT, w = (visEnd-start)*UNIT;
+      ctx.fillStyle = colorMap[pid] || '#58a6ff';
+      ctx.globalAlpha = 0.9;
+      ctx.beginPath(); ctx.roundRect(x,BAR_Y+2,w,BAR_H-4,3); ctx.fill();
+      ctx.globalAlpha = 1;
+      if (w > 22) {
+        ctx.fillStyle = '#fff';
+        ctx.font = `600 11px 'JetBrains Mono',monospace`;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(`P${pid}`, x+w/2, BAR_Y+BAR_H/2);
+      }
+    }
+
+    ctx.fillStyle = fgMuted;
+    ctx.font = `10px 'JetBrains Mono',monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    const step = totalTime<=20?1:totalTime<=50?5:10;
+    for (let t=0;t<=totalTime;t+=step) {
+      const x=30+t*UNIT;
+      ctx.beginPath(); ctx.moveTo(x,BAR_Y+BAR_H); ctx.lineTo(x,BAR_Y+BAR_H+4);
+      ctx.strokeStyle=fgMuted; ctx.stroke();
+      ctx.fillText(String(t),x,BAR_Y+BAR_H+6);
+    }
+    if (progress<1) {
+      const nx=30+curT*UNIT;
+      ctx.strokeStyle=fgColor; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(nx,BAR_Y-4); ctx.lineTo(nx,BAR_Y+BAR_H+4); ctx.stroke();
+    }
+    lbl.textContent = `t = ${curT.toFixed(1)}`;
+  }
+
+  function step(ts) {
+    if (!startTs) startTs = ts;
+    const speed = +slider.value/3;
+    const prog  = Math.min((ts-startTs)*speed/1000/(totalTime*0.8+0.5),1);
+    draw(prog);
+    if (prog<1) animHandle = requestAnimationFrame(step);
+    else { draw(1); lbl.textContent = `t = ${totalTime} (complete)`; }
+  }
+  animHandle = requestAnimationFrame(step);
+}
+
+// ── THEME ─────────────────────────────────────────────────────────────────
+document.getElementById('themeBtn').addEventListener('click', () => {
+  const r = document.documentElement;
+  r.dataset.theme = r.dataset.theme === 'light' ? 'dark' : 'light';
+});
+
+updateVisibility();
+</script>
+</body>
+</html>
